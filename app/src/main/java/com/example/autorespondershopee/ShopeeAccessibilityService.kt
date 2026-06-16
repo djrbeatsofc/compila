@@ -1,17 +1,31 @@
 package com.example.autorespondershopee
 
 import android.accessibilityservice.AccessibilityService
+import android.graphics.Color
+import android.graphics.PixelFormat
+import android.graphics.Rect
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.util.Log
+import android.view.Gravity
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.Button
 import android.widget.Toast
 import java.text.Normalizer
 import java.util.Locale
 
 class ShopeeAccessibilityService : AccessibilityService() {
+    private data class NodeCandidate(
+        val node: AccessibilityNodeInfo,
+        val clickableNode: AccessibilityNodeInfo,
+        val bounds: Rect
+    )
+
     private enum class FlowStep {
         FIND_RESPONDER,
         WAIT_REPLY_FIELD,
@@ -23,13 +37,25 @@ class ShopeeAccessibilityService : AccessibilityService() {
     private var isStepScheduled = false
     private var missCount = 0
     private var lastStatus = ""
+    private var automationEnabled = false
+    private var floatingButton: Button? = null
+    private var windowManager: WindowManager? = null
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        updateStatus("Serviço AutoResponderShopee conectado.")
+        showFloatingPlayButton()
+        updateStatus("Serviço conectado. Toque em Play para iniciar.")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (floatingButton == null) {
+            showFloatingPlayButton()
+        }
+
+        if (!automationEnabled) {
+            return
+        }
+
         if (event == null || !isShopeePackage(event.packageName)) {
             return
         }
@@ -48,6 +74,11 @@ class ShopeeAccessibilityService : AccessibilityService() {
         updateStatus("Serviço interrompido.")
     }
 
+    override fun onDestroy() {
+        removeFloatingPlayButton()
+        super.onDestroy()
+    }
+
     private fun scheduleStep(delayMillis: Long) {
         if (isStepScheduled) {
             return
@@ -61,6 +92,10 @@ class ShopeeAccessibilityService : AccessibilityService() {
     }
 
     private fun runCurrentStep() {
+        if (!automationEnabled) {
+            return
+        }
+
         val rootNode = rootInActiveWindow
         if (rootNode == null || !isShopeePackage(rootNode.packageName)) {
             updateStatus("Tela da Shopee não encontrada.")
@@ -90,7 +125,7 @@ class ShopeeAccessibilityService : AccessibilityService() {
 
     private fun fillReplyField(rootNode: AccessibilityNodeInfo) {
         val replyField = findReplyField(rootNode)
-        val filled = replyField?.let { setNodeText(it, REPLY_MESSAGE) } == true
+        val filled = replyField?.let { setNodeText(it, getReplyMessage()) } == true
 
         if (filled) {
             missCount = 0
@@ -131,14 +166,7 @@ class ShopeeAccessibilityService : AccessibilityService() {
     }
 
     private fun findResponderNode(rootNode: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        return findFirstDepthFirst(rootNode) { node ->
-            node.isVisibleToUser &&
-                hasTextOrDescription(node, RESPONDER_TEXT) &&
-                hasClickableNode(node) &&
-                isLikelyButtonOrClickableText(node)
-        } ?: findByTextFallback(rootNode, RESPONDER_TEXT) { node ->
-            hasClickableNode(node) && isLikelyButtonOrClickableText(node)
-        }
+        return findClickableTextCandidates(rootNode, RESPONDER_TEXT).firstOrNull()?.node
     }
 
     private fun findReplyField(rootNode: AccessibilityNodeInfo): AccessibilityNodeInfo? {
@@ -153,13 +181,48 @@ class ShopeeAccessibilityService : AccessibilityService() {
     }
 
     private fun findSendNode(rootNode: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        return findFirstDepthFirst(rootNode) { node ->
+        return findClickableTextCandidates(rootNode, SEND_TEXT).firstOrNull()?.node
+    }
+
+    private fun findClickableTextCandidates(
+        rootNode: AccessibilityNodeInfo,
+        expectedText: String
+    ): List<NodeCandidate> {
+        val candidates = mutableListOf<NodeCandidate>()
+        collectClickableTextCandidates(rootNode, expectedText, candidates)
+
+        return candidates
+            .distinctBy { it.clickableNode.hashCode() }
+            .sortedWith(
+                compareBy<NodeCandidate> { it.bounds.top }
+                    .thenBy { it.bounds.left }
+                    .thenBy { it.bounds.bottom }
+            )
+    }
+
+    private fun collectClickableTextCandidates(
+        node: AccessibilityNodeInfo,
+        expectedText: String,
+        result: MutableList<NodeCandidate>
+    ) {
+        val clickableNode = findClickableNode(node)
+        if (
             node.isVisibleToUser &&
-                hasTextOrDescription(node, SEND_TEXT) &&
-                hasClickableNode(node) &&
-                isLikelyButtonOrClickableText(node)
-        } ?: findByTextFallback(rootNode, SEND_TEXT) { node ->
-            hasClickableNode(node) && isLikelyButtonOrClickableText(node)
+            node.isEnabled &&
+            clickableNode != null &&
+            textOrDescriptionContains(node, expectedText) &&
+            isLikelyButtonOrClickableText(node)
+        ) {
+            val bounds = Rect()
+            clickableNode.getBoundsInScreen(bounds)
+            if (!bounds.isEmpty) {
+                result.add(NodeCandidate(node, clickableNode, bounds))
+            }
+        }
+
+        for (index in 0 until node.childCount) {
+            val child = node.getChild(index) ?: continue
+            collectClickableTextCandidates(child, expectedText, result)
         }
     }
 
@@ -234,7 +297,11 @@ class ShopeeAccessibilityService : AccessibilityService() {
 
     private fun clickNodeOrClickableParent(node: AccessibilityNodeInfo): Boolean {
         val clickableNode = findClickableNode(node) ?: return false
-        return clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        val clicked = clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        if (!clicked && clickableNode != node) {
+            return node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        }
+        return clicked
     }
 
     private fun hasClickableNode(node: AccessibilityNodeInfo): Boolean {
@@ -272,6 +339,12 @@ class ShopeeAccessibilityService : AccessibilityService() {
         val expectedNormalized = normalize(expected)
         return normalize(node.text?.toString()) == expectedNormalized ||
             normalize(node.contentDescription?.toString()) == expectedNormalized
+    }
+
+    private fun textOrDescriptionContains(node: AccessibilityNodeInfo, expected: String): Boolean {
+        val expectedNormalized = normalize(expected)
+        return normalize(node.text?.toString()).contains(expectedNormalized) ||
+            normalize(node.contentDescription?.toString()).contains(expectedNormalized)
     }
 
     private fun textDescriptionOrHintContains(
@@ -320,6 +393,84 @@ class ShopeeAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun getReplyMessage(): String {
+        return getSharedPreferences(AppConfig.PREFS_NAME, MODE_PRIVATE)
+            .getString(AppConfig.KEY_REPLY_MESSAGE, AppConfig.DEFAULT_REPLY_MESSAGE)
+            ?.ifBlank { AppConfig.DEFAULT_REPLY_MESSAGE }
+            ?: AppConfig.DEFAULT_REPLY_MESSAGE
+    }
+
+    private fun showFloatingPlayButton() {
+        if (floatingButton != null || !canDrawOverlays()) {
+            return
+        }
+
+        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        floatingButton = Button(this).apply {
+            text = "Play"
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.rgb(238, 77, 45))
+            setOnClickListener {
+                toggleAutomation()
+            }
+        }
+
+        val overlayType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            @Suppress("DEPRECATION")
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayType,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            x = 24
+            y = 180
+        }
+
+        windowManager?.addView(floatingButton, params)
+    }
+
+    private fun removeFloatingPlayButton() {
+        floatingButton?.let { button ->
+            windowManager?.removeView(button)
+        }
+        floatingButton = null
+        windowManager = null
+    }
+
+    private fun toggleAutomation() {
+        automationEnabled = !automationEnabled
+        currentStep = FlowStep.FIND_RESPONDER
+        missCount = 0
+
+        floatingButton?.text = if (automationEnabled) {
+            "Pausar"
+        } else {
+            "Play"
+        }
+
+        if (automationEnabled) {
+            updateStatus("Automação iniciada.")
+            scheduleStep(200L)
+        } else {
+            handler.removeCallbacksAndMessages(null)
+            isStepScheduled = false
+            updateStatus("Automação pausada.")
+        }
+    }
+
+    private fun canDrawOverlays(): Boolean {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this)
+    }
+
     companion object {
         private const val TAG = "AutoResponderShopee"
         private const val RESPONDER_TEXT = "Responder"
@@ -327,7 +478,5 @@ class ShopeeAccessibilityService : AccessibilityService() {
         private const val SEND_TEXT = "ENVIAR"
         private const val MAX_MISSES = 8
         private const val MAX_PARENT_DEPTH = 8
-        private const val REPLY_MESSAGE =
-            "Olá! Muito obrigado pela sua avaliação 😊 Ficamos felizes com sua compra e esperamos te atender novamente em breve!"
     }
 }
