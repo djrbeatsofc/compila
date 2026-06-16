@@ -166,7 +166,9 @@ class ShopeeAccessibilityService : AccessibilityService() {
     }
 
     private fun findResponderNode(rootNode: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        return findClickableTextCandidates(rootNode, RESPONDER_TEXT).firstOrNull()?.node
+        val responderCandidates = findClickableTextCandidates(rootNode, RESPONDER_TEXT)
+        return responderCandidates.getOrNull(RESPONDER_BUTTON_INDEX)?.node
+            ?: responderCandidates.firstOrNull()?.node
     }
 
     private fun findReplyField(rootNode: AccessibilityNodeInfo): AccessibilityNodeInfo? {
@@ -478,5 +480,6 @@ class ShopeeAccessibilityService : AccessibilityService() {
         private const val SEND_TEXT = "ENVIAR"
         private const val MAX_MISSES = 8
         private const val MAX_PARENT_DEPTH = 8
+        private const val RESPONDER_BUTTON_INDEX = 1
     }
 }

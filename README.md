@@ -6,7 +6,7 @@ App Android em Kotlin que usa `AccessibilityService` para responder avaliações
 
 1. Com o botão flutuante em `Play`, inicia a automação.
 2. Encontra todos os elementos visíveis com texto ou descrição `Responder`.
-3. Ordena os candidatos pela posição na tela e clica no primeiro botão visível da lista.
+3. Ordena os candidatos pela posição na tela e clica no segundo `Responder`, ignorando o título do topo.
 4. Aguarda a tela de resposta carregar.
 5. Encontra o campo editável com hint/texto `Sua Resposta...`.
 6. Insere a mensagem salva no app.
