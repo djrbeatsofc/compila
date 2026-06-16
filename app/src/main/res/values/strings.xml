@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">AutoResponderShopee</string>
+    <string name="accessibility_service_label">AutoResponderShopee</string>
+    <string name="accessibility_service_description">Automatiza respostas de avaliações na Shopee usando elementos de acessibilidade.</string>
+</resources>
